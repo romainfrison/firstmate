@@ -32,6 +32,7 @@ The why-two-entries mechanism and the consent-gating logic live in the script's 
 Never try to answer either dialog with a key.
 Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so it cannot move a dialog's selection at all, and both dialogs render with the cursor on their declining option, which means a sent Enter ends the session instead of accepting.
 A visible trust dialog means pre-registration did not take effect (or the project entry already carries an explicit decline) - inspect the store and the spawn's error output rather than sending keys.
+Under `config/claude-trust=manual` the spawn skips registration entirely, so a dialog is expected on a project never trusted before: relay the window the spawn names to the captain and let the captain answer it ([`docs/configuration.md`](../../../../../docs/configuration.md) "Claude workspace trust" owns that path).
 A visible external-imports dialog is expected, not a failure signal, whenever the project entry has no prior explicit approval on record - the common first-spawn case; `fm-control.sh <id> interrupt` delivers Escape, which dismisses whichever of the two is on screen without answering it, and is the safe way to clear a wedged pane for inspection.
 
 The once-per-machine bypass-permissions confirmation is a third, separate dialog, scoped to the machine rather than the path, and pre-registration does not address it.

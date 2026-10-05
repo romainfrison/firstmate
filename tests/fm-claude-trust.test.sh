@@ -585,7 +585,7 @@ test_corrupt_store_fails_closed() {
 # The busy-state generation is armed after it, and nothing between that arm and
 # the far-later rollback arming can clear it, so a record stranded here would
 # read as a task busy forever for an id that has no meta at all. The per-task
-# temp root /tmp/fm-<id> is the other resource created on the way to the arm, and
+# temp root /tmp/firstmate/fm-<id> is the other resource created on the way to the arm, and
 # nothing removes it either: fm-teardown finds it through tasktmp= in the task's
 # meta, which a refused spawn never publishes. The id carries this process's pid
 # so the temp-root assertion reads only this run's path.
@@ -618,8 +618,8 @@ test_refused_spawn_leaves_no_task_state() {
     || fail "a refused spawn stranded a busy record nothing can clear"
   [ ! -e "$home/state/$id.busy-gen" ] \
     || fail "a refused spawn stranded a busy generation nothing can clear"
-  [ ! -e "/tmp/fm-$id" ] \
-    || { rm -rf "/tmp/fm-$id"; fail "a refused spawn stranded a temp root no teardown can find"; }
+  [ ! -e "/tmp/firstmate/fm-$id" ] \
+    || { rm -rf "/tmp/firstmate/fm-$id"; fail "a refused spawn stranded a temp root no teardown can find"; }
   pass "fm-spawn.sh: a trust-refused claude spawn leaves no task state behind"
 }
 
@@ -813,6 +813,146 @@ test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
   pass "fm-spawn.sh: a claude secondmate spawn refuses when home trust cannot be recorded"
 }
 
+# config/claude-trust=manual (bin/fm-spawn.sh header): the spawn never touches
+# the Claude store, says once that a dialog is waiting for the human, and
+# reports success only after the worker's own claude-hook busy event. The fake
+# tmux below renders a pane and, from its <hook-at>th capture on, records the
+# hook event the trusted worker's UserPromptSubmit would write; 0 never does.
+make_manual_trust_fakebin() {  # <case-dir> <state-dir> <id> <pane-text> <hook-at>
+  local case_dir=$1 fakebin
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+  mv "$fakebin/tmux" "$fakebin/tmux-spawn"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = capture-pane ]; then
+  n=\$(( \$(cat "$case_dir/captures" 2>/dev/null || echo 0) + 1 ))
+  printf '%s\n' "\$n" > "$case_dir/captures"
+  if [ "$5" -gt 0 ] && [ "\$n" -ge "$5" ]; then
+    "$ROOT/bin/fm-busy-event.sh" apply "$2" "$3" busy --gen "\$(cat "$2/$3.busy-gen")" \\
+      --source claude-hook --event user-prompt-submit >/dev/null 2>&1 || true
+  fi
+  printf '%s\n' "$4"
+  exit 0
+fi
+exec "$fakebin/tmux-spawn" "\$@"
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "$fakebin"
+}
+
+run_manual_trust_spawn() {  # <case-dir> <id> <pane-text> <hook-at> [extra env...]
+  local case_dir=$1 id=$2 home proj wt config fakebin
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  config="$case_dir/claude-config"
+  mkdir -p "$config"
+  fm_test_spawn_home "$home" claude
+  printf 'manual\n' > "$home/config/claude-trust"
+  fm_git_worktree "$proj" "$wt" "wt-$id"
+  fm_test_spawn_brief "$home" "$id"
+  fakebin=$(make_manual_trust_fakebin "$case_dir" "$home/state" "$id" "$3" "$4")
+  FM_TEST_CLAUDE_CONFIG_DIR="$config" FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    FM_CLAUDE_MANUAL_TRUST_POLL_INTERVAL=0.1 FM_CLAUDE_MANUAL_TRUST_TIMEOUT="${5:-20}" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" claude \
+    --mode no-mistakes --yolo off
+}
+
+DIALOG_PANE='Quick safety check: Is this a project you created or one you trust?
+ > No, exit
+   Yes, I trust this folder
+ Enter to confirm . Esc to cancel'
+
+test_manual_trust_waits_for_the_worker_and_never_touches_the_store() {
+  local case_dir out
+  case_dir="$TMP_ROOT/manual-answered"
+  out=$(run_manual_trust_spawn "$case_dir" manualok "$DIALOG_PANE" 3)
+  expect_code 0 $? "a manual-trust spawn whose worker confirms its brief must succeed: $out"
+  assert_absent "$case_dir/claude-config/.claude.json" \
+    "a manual-trust spawn wrote the Claude trust store"
+  assert_contains "$out" "waiting: Claude shows a dialog" \
+    "the spawn did not tell the operator a dialog was waiting"
+  [ "$(printf '%s\n' "$out" | grep -c 'waiting: Claude shows a dialog')" = 1 ] \
+    || fail "the waiting notice must be printed exactly once: $out"
+  assert_grep 'claude --dangerously-skip-permissions' "$case_dir/launch.log" \
+    "the manual-trust spawn did not launch the claude worker"
+  pass "fm-spawn.sh: manual trust waits for the worker's own hook and never touches the store"
+}
+
+test_manual_trust_without_a_dialog_succeeds_silently() {
+  local case_dir out
+  case_dir="$TMP_ROOT/manual-silent"
+  out=$(run_manual_trust_spawn "$case_dir" manualquiet 'Claude Code > working' 1)
+  expect_code 0 $? "a manual-trust spawn into an already trusted folder must succeed: $out"
+  assert_not_contains "$out" "waiting:" "no dialog was shown, yet the spawn announced one"
+  assert_absent "$case_dir/claude-config/.claude.json" \
+    "a manual-trust spawn wrote the Claude trust store"
+  pass "fm-spawn.sh: manual trust with no dialog succeeds without a notice"
+}
+
+test_manual_trust_fails_without_an_answer_and_never_falls_back() {
+  local case_dir out
+  case_dir="$TMP_ROOT/manual-unanswered"
+  out=$(run_manual_trust_spawn "$case_dir" manualnone "$DIALOG_PANE" 0 1)
+  expect_code 1 $? "a manual-trust spawn whose dialog is never answered must fail: $out"
+  assert_contains "$out" "was not answered" "the failure did not name the unanswered dialog"
+  assert_absent "$case_dir/claude-config/.claude.json" \
+    "an unanswered manual-trust spawn fell back to writing the trust store"
+  assert_grep 'failed:' "$case_dir/home/state/manualnone.status" \
+    "the failed manual-trust spawn recorded no failure"
+  pass "fm-spawn.sh: manual trust fails on an unanswered dialog and never registers trust"
+}
+
+# The seed busy record written at launch is busy/fm-spawn; it must never stand
+# in for the worker's own confirmation.
+test_manual_trust_ignores_the_spawn_seed_record() {
+  local case_dir out
+  case_dir="$TMP_ROOT/manual-seed"
+  out=$(run_manual_trust_spawn "$case_dir" manualseed 'Claude Code' 0 1)
+  expect_code 1 $? "the spawn's own busy seed must not count as the worker's confirmation: $out"
+  assert_contains "$out" "never confirmed submitting its brief" \
+    "the failure did not say the worker never confirmed its brief"
+  pass "fm-spawn.sh: manual trust does not count the spawn's own busy seed"
+}
+
+test_invalid_claude_trust_value_is_refused() {
+  local case_dir home proj wt fakebin out
+  case_dir="$TMP_ROOT/trust-invalid"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+  fm_test_spawn_home "$home" claude
+  printf 'sometimes\n' > "$home/config/claude-trust"
+  fm_git_worktree "$proj" "$wt" wt-invalid
+  fm_test_spawn_brief "$home" trustinvalid
+  out=$(FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" trustinvalid "$proj" claude \
+    --mode no-mistakes --yolo off)
+  expect_code 1 $? "an unknown config/claude-trust value must refuse the spawn: $out"
+  assert_contains "$out" "accepted values are: register" "the refusal did not name the accepted values"
+  assert_absent "$case_dir/launch.log" "a worker was launched under an unknown trust setting"
+  pass "fm-spawn.sh: an unknown config/claude-trust value refuses the spawn"
+}
+
+test_manual_trust_refuses_a_secondmate_launch() {
+  local case_dir home out
+  case_dir="$TMP_ROOT/manual-secondmate"
+  home="$case_dir/fm-homes/manual-n1"
+  seed_secondmate_home "$home" manual-n1 clone
+  mkdir -p "$case_dir/primary/config"
+  fm_test_spawn_home "$case_dir/primary" claude
+  printf 'manual\n' > "$case_dir/primary/config/claude-trust"
+  out=$(spawn_secondmate_claude "$case_dir" "$home" manual-n1)
+  expect_code 1 $? "manual trust must refuse a claude secondmate launch: $out"
+  assert_contains "$out" "cannot confirm a claude secondmate launch" \
+    "the refusal did not explain why a secondmate is refused"
+  assert_absent "$case_dir/claude-config/.claude.json" \
+    "a refused manual-trust secondmate launch wrote the trust store"
+  assert_absent "$case_dir/launch.log" "a secondmate was launched under manual trust"
+  pass "fm-spawn.sh: manual trust refuses a claude secondmate launch"
+}
+
 test_fresh_worktree_is_trusted
 test_fresh_worktree_also_trusts_the_project_root_without_import_consent
 test_registration_carries_forward_existing_import_consent
@@ -844,3 +984,9 @@ test_secondmate_leased_worktree_home_is_trusted
 test_secondmate_home_trust_refuses_everything_unseeded
 test_worktree_mode_still_refuses_a_secondmate_home
 test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded
+test_manual_trust_waits_for_the_worker_and_never_touches_the_store
+test_manual_trust_without_a_dialog_succeeds_silently
+test_manual_trust_fails_without_an_answer_and_never_falls_back
+test_manual_trust_ignores_the_spawn_seed_record
+test_invalid_claude_trust_value_is_refused
+test_manual_trust_refuses_a_secondmate_launch

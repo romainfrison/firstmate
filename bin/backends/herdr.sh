@@ -92,6 +92,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # same rule (fm_backend_herdr_pane_process_state).
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-agent-process-lib.sh"
+# shellcheck source=bin/fm-tmp-root-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-tmp-root-lib.sh"
 
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
@@ -777,10 +779,11 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
 # path per live named Herdr session/socket, shared across every Firstmate home
 # that uses that session.
 # The path is never under any one home's state/ and secondmates never write the
-# primary home. Returns non-zero when the named session's socket cannot be
-# resolved unambiguously.
+# primary home; it lives under the shared Firstmate temp root
+# (bin/fm-tmp-root-lib.sh). Returns non-zero when the named session's socket
+# cannot be resolved unambiguously.
 fm_backend_herdr_presentation_lock_namespace() {
-  printf '%s' '/tmp/firstmate-herdr-presentation'
+  printf '%s/herdr-presentation' "$(fm_tmp_root)"
 }
 
 fm_backend_herdr_presentation_lock_namespace_mode() {
@@ -867,6 +870,7 @@ fm_backend_herdr_presentation_session_lock_path() {  # <session>
   key=${hash:0:32}
   dir=$(fm_backend_herdr_presentation_lock_namespace) || return 1
   [ -n "$dir" ] || return 1
+  fm_tmp_root_ensure 2>/dev/null || return 1
   if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
     if ! mkdir -m 700 "$dir" 2>/dev/null; then
       fm_backend_herdr_presentation_lock_namespace_valid "$dir" || return 1
