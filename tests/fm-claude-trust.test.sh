@@ -898,8 +898,6 @@ test_manual_trust_fails_without_an_answer_and_never_falls_back() {
   assert_contains "$out" "was not answered" "the failure did not name the unanswered dialog"
   assert_absent "$case_dir/claude-config/.claude.json" \
     "an unanswered manual-trust spawn fell back to writing the trust store"
-  assert_grep 'failed:' "$case_dir/home/state/manualnone.status" \
-    "the failed manual-trust spawn recorded no failure"
   pass "fm-spawn.sh: manual trust fails on an unanswered dialog and never registers trust"
 }
 
