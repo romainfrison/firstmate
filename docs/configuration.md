@@ -378,6 +378,26 @@ Any other value, or an unreadable file, refuses every spawn from that home, whic
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
 
+## Claude workspace trust (config/claude-trust)
+
+The optional local, gitignored `config/claude-trust` holds one token choosing how a Claude worker launch gets past Claude Code's interactive workspace-trust dialog.
+The token is the file's whitespace-trimmed content.
+`register` keeps the pre-registration through `bin/fm-claude-trust.sh`, which writes the launching user's own Claude store, and is also the default when the file is absent.
+`manual` never reads or writes that store, for an operator whose OS sandbox denies it or who refuses to let an agent grant itself trust.
+The worker launches as-is; when Claude shows a dialog, the spawn says once which window is waiting and the human answers it there.
+Firstmate never answers that dialog and never falls back to registration.
+The spawn reports success only after the worker's own submit hook, which Claude loads only once the folder is trusted, records the launch brief; otherwise it fails after `FM_CLAUDE_MANUAL_TRUST_TIMEOUT` seconds (default 600).
+Claude looks trust up on a linked worktree's primary checkout, so a project trusted once gives every later task worktree zero dialogs; a never-trusted project costs one answer, plus one more if Claude also asks about external `CLAUDE.md` imports.
+`manual` refuses a Claude secondmate launch, which arms no busy-state hook to confirm it.
+Any other value, or an unreadable file, refuses every spawn from that home and names the accepted values.
+The file is read on every spawn and relaunch, and it is not inherited into secondmate homes.
+
+## Firstmate temp root (/tmp/firstmate)
+
+Every per-task temp root, every staged launch directory, and the Herdr presentation lock namespace live under one machine-wide parent, `/tmp/firstmate` (`/private/tmp/firstmate` on macOS).
+An operator who runs Firstmate under an OS sandbox grants writes on that one directory instead of leaving every spawn and teardown outside the sandbox.
+`bin/fm-tmp-root-lib.sh` owns the path and accepts it only as a private directory owned by the current user.
+
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.

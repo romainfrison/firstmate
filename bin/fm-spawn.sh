@@ -288,6 +288,22 @@
 #   worktree, or record exists and names the accepted values. The file is read
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
+# Claude workspace trust (config/claude-trust):
+#   One token choosing how a claude launch (ship, scout, secondmate, and
+#   relaunch) gets past Claude Code's interactive workspace-trust dialog;
+#   `manual` refuses a secondmate launch, which arms no busy-state hook.
+#   Absent or `register` keeps today's pre-registration through
+#   bin/fm-claude-trust.sh, which writes the launching user's own Claude store.
+#   `manual` never reads or writes that store: the worker launches as-is, and
+#   when Claude shows a dialog the spawn says so once on stderr and waits for
+#   the human to answer it in the pane. Firstmate never answers that dialog and
+#   never falls back to registration. Success is reported only once the
+#   worker's own UserPromptSubmit hook, wired in the worktree's project settings
+#   that Claude loads only after the folder is trusted, records the submitted
+#   launch brief; without it the spawn fails after
+#   FM_CLAUDE_MANUAL_TRUST_TIMEOUT seconds (default 600). Token, refusal, and
+#   per-launch read rules match claude-permission-mode, but this file stays
+#   local to its home and is never inherited into secondmate homes.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -498,6 +514,27 @@ case "$CLAUDE_PERMISSION_MODE" in
 auto) CLAUDE_PERM_FLAG='--permission-mode auto' ;;
 *) CLAUDE_PERM_FLAG='--dangerously-skip-permissions' ;;
 esac
+# config/claude-trust (header above): resolved with the permission mode, before
+# any mutation, so a malformed file refuses instead of choosing a trust path the
+# captain did not pick.
+if ! CLAUDE_TRUST_PRESENT=$(fm_config_source_present "$CONFIG/claude-trust"); then
+  exit 1
+fi
+CLAUDE_TRUST_MODE=register
+if [ "$CLAUDE_TRUST_PRESENT" = 1 ]; then
+  if [ ! -f "$CONFIG/claude-trust" ] || [ ! -r "$CONFIG/claude-trust" ]; then
+    echo "error: config/claude-trust must be a readable regular file holding one of: register, manual" >&2
+    exit 1
+  fi
+  CLAUDE_TRUST_MODE=$(tr -d '[:space:]' <"$CONFIG/claude-trust" || true)
+  case "$CLAUDE_TRUST_MODE" in
+  register | manual) ;;
+  *)
+    echo "error: config/claude-trust holds '$CLAUDE_TRUST_MODE'; accepted values are: register (pre-register trust in the Claude store, the default when the file is absent), manual (never touch the store; the human answers Claude's trust dialog in the pane)" >&2
+    exit 1
+    ;;
+  esac
+fi
 SUB_HOME_MARKER=".fm-secondmate-home"
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
@@ -523,6 +560,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-tmp-root-lib.sh
+. "$SCRIPT_DIR/fm-tmp-root-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
@@ -3784,6 +3823,53 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# Claude manual-trust gate (config/claude-trust=manual, header above). The
+# launch skipped trust registration, so Claude may park the pane on its
+# workspace-trust dialog, whose cursor sits on "No, exit", or on the separate
+# external-imports dialog; only the human answers either one. The verdict never
+# rests on vendor text: success needs this incarnation's busy record to carry
+# an event from the worker's own claude-hook source, which only the
+# UserPromptSubmit and later hooks in the worktree's project settings write,
+# and Claude loads those settings only after the folder is trusted. The seed
+# record written at launch carries source fm-spawn, so it never counts. Pane
+# text only decides whether to tell the operator a dialog is waiting.
+CLAUDE_MANUAL_TRUST_PROMPTED=0
+
+claude_pane_shows_dialog() {  # <plain-pane-capture>
+  case "$1" in
+  *'Yes, I trust this folder'* | *'Quick safety check'* | *'external CLAUDE.md'* | *'Enter to confirm'*) return 0 ;;
+  esac
+  return 1
+}
+
+claude_brief_submitted() {
+  local rec source
+  rec=$(fm_busy_record_read "$STATE" "$ID" 2>/dev/null) || return 1
+  source=${rec#* }
+  source=${source%% *}
+  [ "$source" = claude-hook ]
+}
+
+claude_wait_for_manual_trust() {
+  local pane started now
+  local timeout=${FM_CLAUDE_MANUAL_TRUST_TIMEOUT:-600}
+  local interval=${FM_CLAUDE_MANUAL_TRUST_POLL_INTERVAL:-1}
+  case "$timeout" in '' | *[!0-9]*) timeout=600 ;; esac
+  started=$(date +%s)
+  while :; do
+    claude_brief_submitted && return 0
+    pane=$(fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true)
+    if [ "$CLAUDE_MANUAL_TRUST_PROMPTED" -eq 0 ] && claude_pane_shows_dialog "$pane"; then
+      CLAUDE_MANUAL_TRUST_PROMPTED=1
+      echo "waiting: Claude shows a dialog in window $T for $WT; the human must answer it there (\"Yes, I trust this folder\", then any external-import prompt). Firstmate never answers it, and this launch fails after ${timeout}s without that answer" >&2
+    fi
+    now=$(date +%s)
+    [ $((now - started)) -lt "$timeout" ] || break
+    sleep "$interval"
+  done
+  claude_brief_submitted
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -3930,14 +4016,24 @@ fi
 AGY_TRUST_PREREGISTERED=0
 case "$HARNESS" in
 claude*)
-  if [ "$KIND" = secondmate ]; then
-    spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
-  else
-    spawn_trust_args=("$WT" "$PROJ_ABS")
-  fi
-  if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
-    echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
+  # Under config/claude-trust=manual the store is never touched here; the
+  # post-launch manual-trust gate waits for the human's answer instead. That
+  # gate's proof is the busy-state hook armed only for crewmates and scouts, so
+  # a secondmate launch has none and is refused rather than reported blind.
+  if [ "$CLAUDE_TRUST_MODE" = manual ] && [ "$KIND" = secondmate ]; then
+    echo "error: config/claude-trust=manual cannot confirm a claude secondmate launch, which arms no busy-state hook; use register for this home or launch the secondmate on another harness; inspect window $T" >&2
     exit 1
+  fi
+  if [ "$CLAUDE_TRUST_MODE" = register ]; then
+    if [ "$KIND" = secondmate ]; then
+      spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+    else
+      spawn_trust_args=("$WT" "$PROJ_ABS")
+    fi
+    if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+      echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
+      exit 1
+    fi
   fi
   ;;
 agy)
@@ -3951,9 +4047,10 @@ agy)
   ;;
 esac
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
+# Per-task temp root: fm-<id>/ under the Firstmate temp root (bin/fm-tmp-root-lib.sh,
+# /tmp/firstmate) with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
+# Nested (not a bare fm-<id>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 # The root is private (0700) because its path is predictable under a shared
@@ -3961,7 +4058,8 @@ esac
 # this user and writable by nobody else, then tightened, so no other local user
 # can plant or swap a file in it. The staged launch command lives in a sibling
 # directory namespaced by home identity, not in this shared per-id root.
-TASK_TMP="/tmp/fm-$ID"
+fm_tmp_root_ensure || exit 1
+TASK_TMP=$(fm_task_tmp_dir "$ID")
 if ! (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
   if [ -L "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ] || [ ! -O "$TASK_TMP" ] ||
     [ -n "$(find "$TASK_TMP" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
@@ -4784,7 +4882,8 @@ fi
 case "$SPAWN_GEN" in
   *[!A-Za-z0-9.]*|'') echo "error: spawn incarnation token is not a usable launch-file nonce" >&2; exit 1 ;;
 esac
-LAUNCH_DIR="/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
+fm_tmp_root_ensure || exit 1
+LAUNCH_DIR=$(fm_task_launch_dir "$ID" "$LAUNCH_HOME_TOKEN")
 if ! (umask 077 && mkdir "$LAUNCH_DIR") 2>/dev/null; then
   if [ -L "$LAUNCH_DIR" ] || [ ! -d "$LAUNCH_DIR" ] || [ ! -O "$LAUNCH_DIR" ] ||
     [ -n "$(find "$LAUNCH_DIR" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
@@ -4873,6 +4972,18 @@ if [ "$HARNESS" = agy ]; then
     exit 1
   fi
 fi
+case "$HARNESS" in
+claude*)
+  if [ "$CLAUDE_TRUST_MODE" = manual ] && ! claude_wait_for_manual_trust; then
+    if [ "$CLAUDE_MANUAL_TRUST_PROMPTED" -eq 1 ]; then
+      agy_spawn_fail "claude showed a dialog in window $T that was not answered, or the brief was never submitted after it, within ${FM_CLAUDE_MANUAL_TRUST_TIMEOUT:-600}s; config/claude-trust=manual never answers it or registers trust instead"
+    else
+      agy_spawn_fail "claude never confirmed submitting its brief in window $T within ${FM_CLAUDE_MANUAL_TRUST_TIMEOUT:-600}s under config/claude-trust=manual"
+    fi
+    exit 1
+  fi
+  ;;
+esac
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then

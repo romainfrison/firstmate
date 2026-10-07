@@ -508,6 +508,36 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+### Manual trust: a trusted project's new worktree shows no dialog
+
+Verified 2026-10-05 on Claude Code 2.1.289 against the operator's real config, with nothing pre-registered.
+This is the fact `config/claude-trust=manual` rests on: Claude looks trust up on a linked worktree's primary checkout, so manual answers cost one per project rather than one per task worktree.
+
+```sh
+git -C <firstmate-checkout> worktree add --detach /private/tmp/claude-501/probe-wt HEAD
+mkdir -p /private/tmp/claude-501/probe-plain
+herdr pane run <pane> "cd /private/tmp/claude-501/probe-plain && claude"
+herdr pane run <pane> "cd /private/tmp/claude-501/probe-wt && claude"
+```
+
+The control arm, a plain folder beside the worktree, met the dialog, which proves the shared parent directory was not trusted:
+
+```
+ Quick safety check: Is this a project you created or one you trust?
+ ❯ No, exit
+   Yes, I trust this folder
+```
+
+The treatment arm, a fresh linked worktree of the already trusted primary checkout in that same untrusted parent, reached the composer with no trust or external-imports dialog:
+
+```
+ ▐▛███▛█   Claude Code v2.1.289
+ ▝▝   ▝▝   /private/tmp/claude-501/probe-wt
+❯ Try "create a util logging.py that..."
+```
+
+The control dialog was declined with `No, exit`, and both scratch folders were removed.
+
 ## Codex hook trust
 
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.

@@ -285,6 +285,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-tmp-root-lib.sh
+. "$SCRIPT_DIR/fm-tmp-root-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
@@ -981,7 +983,7 @@ fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
-# (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
+# (bin/fm-tmp-root-lib.sh); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
@@ -3560,9 +3562,12 @@ fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
+# Remove the per-task temp root (incl. its gotmp/) recorded by spawn as tasktmp=,
+# under bin/fm-tmp-root-lib.sh's root or, for older tasks, /tmp/fm-<id>/.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# Scratch only: an OS sandbox refusing an older task's /tmp/fm-<id>/ must not
+# abort the rest of teardown under set -e.
+[ -z "$TASK_TMP" ] || rm -rf "$TASK_TMP" 2>/dev/null || true
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.
 teardown_launch_home_token() {
@@ -3582,7 +3587,10 @@ teardown_launch_home_token() {
 }
 LAUNCH_HOME_TOKEN=$(teardown_launch_home_token "$FM_HOME") || LAUNCH_HOME_TOKEN=
 if [ -n "$LAUNCH_HOME_TOKEN" ]; then
-  rm -rf "/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
+  rm -rf "$(fm_task_launch_dir "$ID" "$LAUNCH_HOME_TOKEN")"
+  # A task spawned before the shared temp root staged its launch here instead;
+  # an OS sandbox may refuse this legacy path, which must not stop teardown.
+  rm -rf "/tmp/fm-$ID+$LAUNCH_HOME_TOKEN" 2>/dev/null || true
 fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
